@@ -6,14 +6,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-subxt = "0.21.0"
-#subxt={path="../../../opensourcecode/polka/subxt/subxt"}
+#subxt = "0.27.1"
+subxt={path="../../../opensourcecode/polka/subxt/subxt"}
 hex = "0.4.3"
 tokio = { version = "1.8", features = ["rt-multi-thread", "macros", "time"] }
-sp-keyring = "6.0.0"
+sp-keyring = "18.0.0"
 codec = { package = "parity-scale-codec", version = "3.0.0", default-features = false, features = ["derive", "full", "bit-vec"] }
 tracing-subscriber = "0.3.11"
 tracing="0.1.35"
-sp-core = "6.0.0"
-jsonrpsee={version="0.10.1",features=["async-client","client-ws-transport"]}
+sp-core = "16.0.0"
+jsonrpsee={version="0.16.2",features=["async-client","client-ws-transport","ws-client","jsonrpsee-client-transport"]}
 serde_json="*"
+url="*"

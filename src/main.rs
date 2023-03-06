@@ -1,16 +1,16 @@
 use std::collections::HashMap;
 use std::str::FromStr;
-use codec::Encode;
-use jsonrpsee::core::__reexports::serde_json;
+use codec::{Compact, Encode};
+use jsonrpsee::client_transport::ws::Uri;
 use sp_core::crypto::Ss58Codec;
 use sp_core::{ByteArray, Bytes, Decode, Pair};
 use sp_keyring::AccountKeyring;
-use subxt::*;
-use subxt::extrinsic::{AssetTip, Era, ExtrinsicParams, PlainTip};
-use subxt::rpc::JsonValue;
+use subxt::{OnlineClient, PolkadotConfig};
+use subxt::config::ExtrinsicParams;
+use subxt::tx::{SubmittableExtrinsic, TxPayload};
+use subxt::utils::{AccountId32, MultiAddress, MultiSignature};
 use tracing_subscriber::FmtSubscriber;
 use tracing::Level;
-use subxt::rpc::ClientT;
 const ADDR_1:&str="5DkA4a1H8HfqjUpSm8JKJYGXdHX6BQ5eUo5NFSa3VzpHGVDM";
 const PUB_KEY_1:&str="4a5304cd8eba56c8dc6f6b6ba91b89294572e8a8312f6f2839f8685aa0f90a2b";
 const SECRET_1:&str="975ecdda71e25ab75ec5d15ac362889c381a849c46344f24efa6139c513ea8c6";
@@ -21,18 +21,20 @@ const SECRET_2:&str="1b7185e8a4082518b560f004ac2031f72b254d621fb318e99f9c6f27514
 
 #[tokio::main]
 async fn main() {
+    let log_files = std::fs::File::create("./local_log.txt").unwrap();
     // a builder for `FmtSubscriber`.
     let subscriber = FmtSubscriber::builder()
         // all spans/events with a level higher than TRACE (e.g, debug, info, warn, etc.)
         // will be written to stdout.
-        .with_max_level(Level::INFO)
+        .with_max_level(Level::TRACE)
+        .with_writer(log_files)
         // completes the builder.
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-    get_fee_info().await;
+    get_balance_test().await;
 }
 
-#[subxt::subxt(runtime_metadata_path = "artifacts/westmint.scale")]
+#[subxt::subxt(runtime_metadata_path = "artifacts/westend.scale")]
 mod polkadot {}
 
 async fn generate_address(){
@@ -47,20 +49,27 @@ async fn generate_address(){
     println!("address :{}", account_id.to_ss58check());
 }
 
-async fn get_balance_test(){
-    let api=ClientBuilder::new()
-        .set_url("wss://westmint-rpc.polkadot.io:443")
-        .build()
-        .await.unwrap()
-        .to_runtime_api::<polkadot::RuntimeApi<DefaultConfig, PolkadotExtrinsicParams<DefaultConfig>>>();
+async fn create_client(){
+    let _client_obj = jsonrpsee::ws_client::WsClientBuilder::default().build("wss://westend-rpc.polkadot.io:443").await.unwrap();
+}
 
-    let addr= sp_core::crypto::AccountId32::from_ss58check(ADDR_1).expect("addr convert error");
-    let result = api
-        .storage()
-        .system()
-        .account(&addr,None)
-        .await
-        .unwrap();
+async fn get_balance_test(){
+    let api = subxt::OnlineClient::<PolkadotConfig>
+    ::from_url("wss://westend-rpc.polkadot.io:443")
+        .await.unwrap();
+
+    let addr= AccountId32::from_str(ADDR_1).expect("addr convert error");
+
+    let storage_address = polkadot::storage().system().account(&addr);
+
+
+    let result = api.storage().at(None).await.unwrap().fetch_or_default(&storage_address).await.unwrap();
+    // let result = api
+    //     .storage()
+    //     .system()
+    //     .account(&addr,None)
+    //     .await
+    //     .unwrap();
     println!("nonce:{}",result.nonce.to_string());
     println!("free:{}",result.data.free.to_string());
     println!("reserved:{}",result.data.reserved.to_string());
@@ -69,16 +78,15 @@ async fn get_balance_test(){
 }
 
 async fn transfer_test2(){
-    let api=ClientBuilder::new()
-        .set_url("wss://westmint-rpc.polkadot.io:443")
-        .build()
-        .await.unwrap()
-        .to_runtime_api::<polkadot::RuntimeApi<DefaultConfig, SubstrateExtrinsicParams<DefaultConfig>>>();
+    let api = subxt::OnlineClient::<PolkadotConfig>
+    ::from_url("wss://westend-rpc.polkadot.io:443")
+        .await.unwrap();
+
     let from_secret= SECRET_1;
-    let from_addr= sp_core::crypto::AccountId32::from_ss58check(ADDR_1).expect("addr convert error");
-    let to_address= sp_core::crypto::AccountId32::from_ss58check(ADDR_2).expect("addr convert error");
+    let from_addr= AccountId32::from_str(ADDR_1).expect("addr convert error");
+    let to_address= AccountId32::from_str(ADDR_2).expect("addr convert error");
     let amount= u128::from_str("1000000000000").expect("amount convert error");
-    let signer= sp_core::sr25519::Pair::from_seed_slice(&hex::decode(from_secret).unwrap()).expect("sr25519 from seed error");
+    let signer =  sp_core::sr25519::Pair::from_seed_slice(&hex::decode(from_secret).unwrap()).unwrap();
 
     // Configure the transaction tip and era:
     /*
@@ -87,79 +95,70 @@ async fn transfer_test2(){
         .era(Era::Immortal, *api.client.genesis());
     */
 
-    let signer= subxt::PairSigner::<DefaultConfig,_>::new(signer);
-    let tx_hash = api
-        .tx()
-        .balances()
-        .transfer(subxt::sp_runtime::MultiAddress::Id(to_address), amount).expect("create transfer error")
-        .create_signed(&signer, Default::default())
-        .await.expect("commit error");
+    let signer= subxt::tx::PairSigner::<PolkadotConfig,_>::new(signer);
+
+    let tx = polkadot::tx().balances()
+        .transfer(MultiAddress::Id(to_address), amount);
+
+    let tx_hash = api.tx().sign_and_submit_default(&tx, &signer).await.unwrap();
     println!("tx hash:{}",hex::encode(&tx_hash.encode()));
 }
 
 async fn transfer_test(){
-    let api=ClientBuilder::new()
-        .set_url("wss://westmint-rpc.polkadot.io:443")
-        .build()
-        .await.unwrap()
-        .to_runtime_api::<polkadot::RuntimeApi<DefaultConfig, SubstrateExtrinsicParams<DefaultConfig>>>();
+    let api = subxt::OnlineClient::<PolkadotConfig>
+    ::from_url("wss://westend-rpc.polkadot.io:443")
+        .await.unwrap();
 
     let from_secret=SECRET_1;
-    let from_addr= sp_core::crypto::AccountId32::from_ss58check(ADDR_1).expect("addr convert error");
-    let result = api
-        .storage()
-        .system()
-        .account(&from_addr,None)
-        .await
-        .unwrap();
+    let from_addr= AccountId32::from_str(ADDR_1).expect("addr convert error");
+    let storage_address = polkadot::storage().system().account(&from_addr);
+    let result = api.storage().at(None).await.unwrap().fetch_or_default(&storage_address).await.unwrap();
 
-    let to_address= sp_core::crypto::AccountId32::from_ss58check(ADDR_2).expect("addr convert error");
+    let to_address= AccountId32::from_str(ADDR_2).expect("addr convert error");
     let amount=u128::from_str("1000000000000").expect("amount convert error");
-    let caller= polkadot::balances::calls::Transfer{
-        dest:subxt::sp_runtime::MultiAddress::Id(to_address.clone()),
-        value:amount
-    };
-    let nonce=result.nonce;
+    let caller = polkadot::tx().balances()
+        .transfer(MultiAddress::Id(to_address.clone()), amount);
+    let nonce = result.nonce;
     println!("nonce:{}",nonce);
-    let unsigned= convert_to_unsigned(nonce,caller,&api).await.expect("convert to unsigned error");
+    let unsigned= convert_to_unsigned(nonce, caller,&api, Default::default()).await.expect("convert to unsigned error");
     println!("unsigned:{}",hex::encode(&unsigned));
 
     let signer= sp_core::sr25519::Pair::from_seed_slice(&hex::decode(from_secret).unwrap()).expect("sr25519 from seed error");
     let mut sign= signer.sign(&unsigned).0.to_vec();
-    sign.insert(0,0x01u8); // 1代表 sr25519
-    println!("sign result:{}",hex::encode(&sign));
+    // println!("sign result:{}",hex::encode(&sign));
 
-    let caller = polkadot::balances::calls::Transfer{
-        dest:subxt::sp_runtime::MultiAddress::Id(to_address.clone()),
-        value:amount
-    };
+    let mut sign_bytes = [0u8;64];
+    sign_bytes.copy_from_slice(&sign);
+    let sign = MultiSignature::Sr25519(sign_bytes);
+    // sign.insert(0,0x01u8); // 1代表 sr25519
 
-    let tx_hash=  commit_unsigned(nonce,&sp_runtime::MultiAddress::Id(from_addr.clone()),&sign, caller,&api).await.expect("commit error");
+    let caller = polkadot::tx().balances()
+        .transfer(MultiAddress::Id(to_address), amount);
+
+    let tx_hash=  commit_unsigned(nonce,&MultiAddress::Id(from_addr.clone()),sign, caller,&api, Default::default()).await.expect("commit error");
     println!("tx hash!!:{}",tx_hash);
 }
 
-async fn convert_to_unsigned<C: Call + Send + Sync>(nonce:u32,caller:C,api:&polkadot::RuntimeApi<DefaultConfig, SubstrateExtrinsicParams<DefaultConfig>>)->Result<Vec<u8>,subxt::BasicError>{
+async fn convert_to_unsigned<C: TxPayload + Send + Sync, Config:subxt::Config>(nonce: Config::Index,caller:C,api:&OnlineClient<Config>, other_param: <Config::ExtrinsicParams as ExtrinsicParams<Config::Index, Config::Hash>>::OtherParams)->Result<Vec<u8>,subxt::Error>{
     // 2. SCALE encode call data to bytes (pallet u8, call u8, call params).
     let call_data = {
-        let mut bytes = Vec::new();
-        let metadata = api.client.metadata();
-        let pallet = metadata.pallet(C::PALLET)?;
-        bytes.push(pallet.index());
-        bytes.push(pallet.call_index::<C>()?);
-        caller.encode_to(&mut bytes);
-        subxt::Encoded(bytes)
+        let metadata = api.offline().metadata();
+        subxt::utils::Encoded(caller.encode_call_data(&metadata).unwrap())
     };
 
     // 3. Construct our custom additional/extra params.
     let additional_and_extra_params = {
         // Obtain spec version and transaction version from the runtime version of the client.
-        let runtime= api.client.rpc().runtime_version(None).await?;
-        SubstrateExtrinsicParams::<DefaultConfig>::new(
+
+        let offline_client = api.offline();
+        let runtime= offline_client.runtime_version();
+        let genesis_hash= offline_client.genesis_hash();
+        <Config::ExtrinsicParams as ExtrinsicParams<Config::Index, Config::Hash>>::new(
             runtime.spec_version,
             runtime.transaction_version,
             nonce,
-            api.client.genesis().clone(),
-            Default::default(),
+            genesis_hash,
+            other_param,
         )
     };
 
@@ -181,32 +180,31 @@ async fn convert_to_unsigned<C: Call + Send + Sync>(nonce:u32,caller:C,api:&polk
     }
 }
 
-async fn commit_unsigned<C: Call + Send + Sync,Config:subxt::Config>(nonce:Config::Index,sender_address:&Config::Address,signature:&[u8],caller:C,api:&polkadot::RuntimeApi<Config, SubstrateExtrinsicParams<Config>>)->Result<String,subxt::BasicError>{
+async fn commit_unsigned<C: TxPayload + Send + Sync,Config:subxt::Config>(nonce:Config::Index, sender_address:&Config::Address, signature:Config::Signature,
+                                                                     caller:C,api:&OnlineClient<Config>,other_param:<Config::ExtrinsicParams as ExtrinsicParams<Config::Index, Config::Hash>>::OtherParams)->Result<String,subxt::Error>{
     // 2. SCALE encode call data to bytes (pallet u8, call u8, call params).
     let call_data = {
-        let mut bytes = Vec::new();
-        let metadata = api.client.metadata();
-        let pallet = metadata.pallet(C::PALLET)?;
-        bytes.push(pallet.index());
-        bytes.push(pallet.call_index::<C>()?);
-        caller.encode_to(&mut bytes);
-        subxt::Encoded(bytes)
+        let metadata = api.offline().metadata();
+        subxt::utils::Encoded(caller.encode_call_data(&metadata).unwrap())
     };
 
     // 3. Construct our custom additional/extra params.
     let additional_and_extra_params = {
         // Obtain spec version and transaction version from the runtime version of the client.
-        let runtime= api.client.rpc().runtime_version(None).await?;
-        SubstrateExtrinsicParams::<Config>::new(
+
+        let offline_client = api.offline();
+        let runtime= offline_client.runtime_version();
+        let genesis_hash= offline_client.genesis_hash();
+        <Config::ExtrinsicParams as ExtrinsicParams<Config::Index, Config::Hash>>::new(
             runtime.spec_version,
             runtime.transaction_version,
             nonce,
-            api.client.genesis().clone(),
-            Default::default(),
+            genesis_hash,
+            other_param,
         )
     };
 
-    println!("xt signature: {}", hex::encode(signature));
+    // println!("xt signature: {}", hex::encode(signature.));
 
     // 5. Encode extrinsic, now that we have the parts we need. This is compatible
     //    with the Encode impl for UncheckedExtrinsic (protocol version 4).
@@ -214,19 +212,16 @@ async fn commit_unsigned<C: Call + Send + Sync,Config:subxt::Config>(nonce:Confi
         let mut encoded_inner = Vec::new();
         // "is signed" + transaction protocol version (4)
         (0b10000000 + 4u8).encode_to(&mut encoded_inner);
-        println!("extrinsic 1:{}",hex::encode(&encoded_inner));
         // from address for signature
         sender_address.encode_to(&mut encoded_inner);
-        println!("extrinsic 2:{}",hex::encode(&encoded_inner));
         // the signature bytes
-        Encoded(signature.to_vec()).encode_to(&mut encoded_inner);
-        println!("extrinsic 3:{}",hex::encode(&encoded_inner));
+        signature.encode_to(&mut encoded_inner);
         // attach custom extra params
         additional_and_extra_params.encode_extra_to(&mut encoded_inner);
         // and now, call data
         call_data.encode_to(&mut encoded_inner);
         // now, prefix byte length:
-        let len = codec::Compact(
+        let len = Compact(
             u32::try_from(encoded_inner.len())
                 .expect("extrinsic size expected to be <4GB"),
         );
@@ -239,37 +234,79 @@ async fn commit_unsigned<C: Call + Send + Sync,Config:subxt::Config>(nonce:Confi
     // Wrap in Encoded to ensure that any more "encode" calls leave it in the right state.
     // maybe we can just return the raw bytes..
     println!("extrinsic bytes:{}",hex::encode(&extrinsic));
-    let tx_hash = api.client.rpc().submit_extrinsic(Encoded(extrinsic)).await?;
+        let tx_hash = SubmittableExtrinsic::from_bytes(
+            api.clone(),
+            extrinsic,
+        ).submit().await.unwrap();
     Ok(hex::encode(tx_hash.as_ref()))
     //println!("tx hash:{}",hex::encode(&Encoded(extrinsic).encode()));
 
     //Ok("".to_string())
 }
 
-async fn get_empty_extrinisc<C: Call + Send + Sync,Config:subxt::Config>(nonce:Config::Index,sender_address:&Config::Address,caller:C,api:&polkadot::RuntimeApi<Config, SubstrateExtrinsicParams<Config>>)->Result<Vec<u8>,subxt::BasicError>{
+async fn get_fee_info(){
+    let api = subxt::OnlineClient::<PolkadotConfig>
+    ::from_url("wss://westend-rpc.polkadot.io:443")
+        .await.unwrap();
+    const ADDR_1:&str="5GE2SqrRB7rbM1uKkogqkFT6m6xjn7KD2MQ6r6PLCvfT6Zba";
+    const ADDR_2:&str="5FsAMJ4Co89NGkKguhb7GG7K4WSoQzy9SAPoEQtnRoJdK2Bb";
+    let from_secret=SECRET_1;
+    let from_addr= subxt::utils::AccountId32::from_str(ADDR_1).expect("addr convert error");
+    let storage_address = polkadot::storage().system().account(&from_addr);
+    let result = api.storage().at(None).await.unwrap().fetch_or_default(&storage_address).await.unwrap();
+
+    let to_address= subxt::utils::AccountId32::from_str(ADDR_2).expect("addr convert error");
+    let amount=u128::from_str("10000000000").expect("amount convert error");
+
+    println!("to:{} amount:{}", hex::encode(&to_address.0), amount);
+    let caller = polkadot::tx().balances()
+        .transfer(MultiAddress::Id(to_address), amount);
+
+    let from_addr = MultiAddress::Id(from_addr);
+    let extrinisc= get_empty_extrinisc(result.nonce, &from_addr, &caller, &api, Default::default()).await.expect("get extrinisc error");
+    println!("extrinisc bytes:{}", hex::encode(&extrinisc));
+    let extrinisc:Bytes= extrinisc.into();
+
+    let params= subxt::rpc::rpc_params![extrinisc];
+    // let params = subxt::rpc::RpcParams(extrinisc.as_ref().to_vec());
+
+    match api.rpc()
+        .request::<serde_json::Value>("payment_queryInfo", params)
+        .await{
+        Ok(val)=>{
+            println!("result:{:?}",val);
+        },
+        Err(err)=>{
+            println!("err:{}",err.to_string());
+        }
+    }
+}
+async fn get_empty_extrinisc<C: TxPayload + Send + Sync,Config:subxt::Config>(nonce:Config::Index,sender_address:&Config::Address,caller:&C,api:&OnlineClient<Config>,
+                                                                              other_param:<Config::ExtrinsicParams as ExtrinsicParams<Config::Index, Config::Hash>>::OtherParams)->Result<Vec<u8>,subxt::Error>{
     // 2. SCALE encode call data to bytes (pallet u8, call u8, call params).
     let call_data = {
-        let mut bytes = Vec::new();
-        let metadata = api.client.metadata();
-        let pallet = metadata.pallet(C::PALLET)?;
-        bytes.push(pallet.index());
-        bytes.push(pallet.call_index::<C>()?);
-        caller.encode_to(&mut bytes);
-        subxt::Encoded(bytes)
+        let metadata = api.offline().metadata();
+        subxt::utils::Encoded(caller.encode_call_data(&metadata).unwrap())
     };
+    println!("call_data:{}", hex::encode(&call_data.0));
 
     // 3. Construct our custom additional/extra params.
     let additional_and_extra_params = {
         // Obtain spec version and transaction version from the runtime version of the client.
-        let runtime= api.client.rpc().runtime_version(None).await?;
-        SubstrateExtrinsicParams::<Config>::new(
+
+        let offline_client = api.offline();
+        let runtime= offline_client.runtime_version();
+        let genesis_hash= offline_client.genesis_hash();
+        println!("nonce:{:?} spec_version:{} transaction_version:{} genesis:{:?}", nonce, runtime.spec_version, runtime.transaction_version, genesis_hash);
+        <Config::ExtrinsicParams as ExtrinsicParams<Config::Index, Config::Hash>>::new(
             runtime.spec_version,
             runtime.transaction_version,
             nonce,
-            api.client.genesis().clone(),
-            Default::default(),
+            genesis_hash,
+            other_param,
         )
     };
+    println!("nonce:{:?}", additional_and_extra_params);
 
     // 5. Encode extrinsic, now that we have the parts we need. This is compatible
     //    with the Encode impl for UncheckedExtrinsic (protocol version 4).
@@ -282,14 +319,14 @@ async fn get_empty_extrinisc<C: Call + Send + Sync,Config:subxt::Config>(nonce:C
         sender_address.encode_to(&mut encoded_inner);
         println!("added sender_address:{}",hex::encode(&encoded_inner));
         // the signature bytes
-        Encoded(signature.to_vec()).encode_to(&mut encoded_inner);
+        signature.encode_to(&mut encoded_inner);
         println!("added signature:{}",hex::encode(&encoded_inner));
         // attach custom extra params
         additional_and_extra_params.encode_extra_to(&mut encoded_inner);
         // and now, call data
         call_data.encode_to(&mut encoded_inner);
         // now, prefix byte length:
-        let len = codec::Compact(
+        let len = Compact(
             u32::try_from(encoded_inner.len())
                 .expect("extrinsic size expected to be <4GB"),
         );
@@ -307,43 +344,13 @@ async fn get_empty_extrinisc<C: Call + Send + Sync,Config:subxt::Config>(nonce:C
     //Ok("".to_string())
 }
 
-async fn get_fee_info(){
-    let api=ClientBuilder::new()
-        .set_url("wss://westmint-rpc.polkadot.io:443")
-        .build()
-        .await.unwrap()
-        .to_runtime_api::<polkadot::RuntimeApi<DefaultConfig, SubstrateExtrinsicParams<DefaultConfig>>>();
+async fn get_block_hash(){
+    let api = subxt::OnlineClient::<PolkadotConfig>
+    ::from_url("wss://westend-rpc.polkadot.io:443")
+        .await.unwrap();
 
-    let from_secret=SECRET_1;
-    let from_addr= sp_core::crypto::AccountId32::from_ss58check(ADDR_1).expect("addr convert error");
-    let result = api
-        .storage()
-        .system()
-        .account(&from_addr,None)
-        .await
-        .unwrap();
+    let storage_address = polkadot::storage().system().block_hash(&11201u32);
 
-    let to_address= sp_core::crypto::AccountId32::from_ss58check(ADDR_2).expect("addr convert error");
-    let amount=u128::from_str("1000000000000").expect("amount convert error");
-    let caller= polkadot::balances::calls::Transfer{
-        dest:subxt::sp_runtime::MultiAddress::Id(to_address.clone()),
-        value:amount
-    };
-
-    let from_addr=subxt::sp_runtime::MultiAddress::Id(from_addr);
-    let extrinisc= get_empty_extrinisc(result.nonce,&from_addr,caller,&api).await.expect("get extrinisc error");
-    let extrinisc:Bytes= extrinisc.into();
-
-    let params=jsonrpsee::rpc_params!( extrinisc );
-
-    match api.client.rpc().client
-        .request::<serde_json::Value>("payment_queryInfo", params)
-        .await{
-        Ok(val)=>{
-            println!("result:{:?}",val);
-        },
-        Err(err)=>{
-            println!("err:{}",err.to_string());
-        }
-    }
+    let result = api.storage().at(None).await.unwrap().fetch_or_default(&storage_address).await.unwrap();
+    println!("result:{}", result);
 }
